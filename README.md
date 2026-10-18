@@ -1,4 +1,4 @@
-# JAV Tools
+# JAV Title Categorizer
 
 PyQt desktop utilities for JAV media classification, SQLite catalog, filename fixing, and actor-based grouping.
 
