@@ -1,7 +1,8 @@
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QMessageBox, QTableWidgetItem, QTreeWidgetItem
+from PyQt5.QtWidgets import QMessageBox, QProgressDialog, QTableWidgetItem, QTreeWidgetItem
 
-from core.actor_searcher import ActorGroup, move_actor_groups
+from core.actor_searcher import ActorGroup, count_move_tasks, scan_first_level_mp4
+from core.db import DEFAULT_DB_PATH
 from core.filename_fixer import RenameItem, apply_renames, scan_directory
 
 
@@ -11,6 +12,8 @@ class ExtraTabsMixin:
     def _init_extra_tab_state(self):
         self._rename_items: list[RenameItem] = []
         self._actor_groups: list[ActorGroup] = []
+        self._actor_header_sync = False
+        self._actor_move_progress: QProgressDialog | None = None
 
     def filenameFixerTab(self):
         self.ui.fixerBrowseBtn.clicked.connect(self.fixerBrowse)
@@ -77,9 +80,11 @@ class ExtraTabsMixin:
         self.ui.actorScanBtn.clicked.connect(self.actorScan)
         self.ui.actorStopBtn.clicked.connect(self.actorScanStop)
         self.ui.actorStopBtn.setEnabled(False)
-        self.ui.actorSelectAllBtn.clicked.connect(self.actorSelectAll)
-        self.ui.actorClearSelectionBtn.clicked.connect(self.actorClearSelection)
         self.ui.actorMoveBtn.clicked.connect(self.actorMove)
+        self.ui.actorHeaderCheck.setTristate(True)
+        self.ui.actorHeaderCheck.setEnabled(False)
+        self.ui.actorHeaderCheck.stateChanged.connect(self._on_actor_header_check_changed)
+        self.ui.actorTree.itemChanged.connect(self._on_actor_tree_item_changed)
 
     def actorBrowse(self):
         path = self.pick_directory(self.ui.actorPathEdit.text())
@@ -108,6 +113,7 @@ class ExtraTabsMixin:
         self.busy.set_worker(worker)
         self.ui.actorScanBtn.setEnabled(False)
         self.ui.actorMoveBtn.setEnabled(False)
+        self.ui.actorHeaderCheck.setEnabled(False)
         self.ui.actorStopBtn.setEnabled(True)
         worker.start()
 
@@ -120,6 +126,8 @@ class ExtraTabsMixin:
 
     def _populate_actor_tree(self):
         tree = self.ui.actorTree
+        self._actor_header_sync = True
+        tree.blockSignals(True)
         tree.clear()
         for group in self._actor_groups:
             top = QTreeWidgetItem([group.actor, str(len(group.files))])
@@ -131,6 +139,14 @@ class ExtraTabsMixin:
                 top.addChild(child)
             tree.addTopLevelItem(top)
         tree.expandAll()
+        tree.header().setStretchLastSection(False)
+        tree.setColumnWidth(0, max(280, tree.columnWidth(0)))
+        tree.setColumnWidth(1, 60)
+        tree.blockSignals(False)
+        self._actor_header_sync = False
+        has_groups = tree.topLevelItemCount() > 0
+        self.ui.actorHeaderCheck.setEnabled(has_groups)
+        self._refresh_actor_header_check()
 
     def _sync_actor_checks_from_tree(self):
         for index, group in enumerate(self._actor_groups):
@@ -138,27 +154,116 @@ class ExtraTabsMixin:
             if top is not None:
                 group.checked = top.checkState(0) == Qt.Checked
 
-    def actorSelectAll(self):
-        for index in range(self.ui.actorTree.topLevelItemCount()):
-            self.ui.actorTree.topLevelItem(index).setCheckState(0, Qt.Checked)
-        for group in self._actor_groups:
-            group.checked = True
+    def _set_all_actor_checks(self, checked: bool) -> None:
+        if not self._actor_groups:
+            return
+        state = Qt.Checked if checked else Qt.Unchecked
+        self._actor_header_sync = True
+        self.ui.actorTree.blockSignals(True)
+        try:
+            for index in range(self.ui.actorTree.topLevelItemCount()):
+                self.ui.actorTree.topLevelItem(index).setCheckState(0, state)
+            for group in self._actor_groups:
+                group.checked = checked
+        finally:
+            self.ui.actorTree.blockSignals(False)
+            self._actor_header_sync = False
+        self._refresh_actor_header_check()
 
-    def actorClearSelection(self):
-        for index in range(self.ui.actorTree.topLevelItemCount()):
-            self.ui.actorTree.topLevelItem(index).setCheckState(0, Qt.Unchecked)
-        for group in self._actor_groups:
-            group.checked = False
+    def _refresh_actor_header_check(self) -> None:
+        if not self._actor_groups:
+            self._actor_header_sync = True
+            self.ui.actorHeaderCheck.setCheckState(Qt.Unchecked)
+            self._actor_header_sync = False
+            return
+        self._sync_actor_checks_from_tree()
+        checked = sum(1 for group in self._actor_groups if group.checked)
+        total = len(self._actor_groups)
+        self._actor_header_sync = True
+        if checked == 0:
+            self.ui.actorHeaderCheck.setCheckState(Qt.Unchecked)
+        elif checked == total:
+            self.ui.actorHeaderCheck.setCheckState(Qt.Checked)
+        else:
+            self.ui.actorHeaderCheck.setCheckState(Qt.PartiallyChecked)
+        self._actor_header_sync = False
+
+    def _on_actor_header_check_changed(self, state: int) -> None:
+        if self._actor_header_sync:
+            return
+        if state == Qt.PartiallyChecked:
+            self._set_all_actor_checks(True)
+            return
+        self._set_all_actor_checks(state == Qt.Checked)
+
+    def _on_actor_tree_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        if self._actor_header_sync or column != 0:
+            return
+        index = self.ui.actorTree.indexOfTopLevelItem(item)
+        if index < 0 or index >= len(self._actor_groups):
+            return
+        self._actor_groups[index].checked = item.checkState(0) == Qt.Checked
+        self._refresh_actor_header_check()
 
     def actorMove(self):
+        if self.busy.warn_if_busy(self):
+            return
         path = self.ui.actorPathEdit.text().strip()
         if not path or not self._actor_groups:
             QMessageBox.information(self, "Error!", "Scan a directory first.")
             return
         self._sync_actor_checks_from_tree()
-        for msg in move_actor_groups(path, self._actor_groups):
-            self.ui.actorLog.append(msg)
-        self.actorScan()
+        groups_snapshot = [
+            ActorGroup(group.actor, list(group.files), group.checked) for group in self._actor_groups
+        ]
+        total = count_move_tasks(groups_snapshot)
+        if total == 0:
+            QMessageBox.information(self, "Move", "No files selected to move.")
+            return
+
+        from workers.actor_move_worker import ActorMoveWorker
+
+        self._actor_move_progress = QProgressDialog("Moving files...", None, 0, total, self)
+        self._actor_move_progress.setWindowTitle("Moving files")
+        self._actor_move_progress.setWindowModality(Qt.WindowModal)
+        self._actor_move_progress.setMinimumDuration(0)
+        self._actor_move_progress.setAutoClose(True)
+        self._actor_move_progress.setAutoReset(True)
+        self._actor_move_progress.setValue(0)
+
+        worker = ActorMoveWorker(path, groups_snapshot, db_path=DEFAULT_DB_PATH)
+        worker.progress.connect(self._on_actor_move_progress)
+        worker.log_line.connect(self.ui.actorLog.append)
+        self._start_worker(
+            worker,
+            on_finished=self._after_actor_move,
+            disable_widgets=[self.ui.actorMoveBtn, self.ui.actorScanBtn],
+        )
+        self._actor_move_progress.show()
+
+    def _on_actor_move_progress(self, current: int, total: int, filename: str) -> None:
+        if self._actor_move_progress is None:
+            return
+        self._actor_move_progress.setMaximum(total)
+        self._actor_move_progress.setValue(current)
+        self._actor_move_progress.setLabelText(f"Moving ({current}/{total}): {filename}")
+
+    def _after_actor_move(self) -> None:
+        if self._actor_move_progress is not None:
+            self._actor_move_progress.close()
+            self._actor_move_progress = None
+        path = self.ui.actorPathEdit.text().strip()
+        remaining = set(scan_first_level_mp4(path))
+        self._actor_groups = [
+            ActorGroup(
+                group.actor,
+                [name for name in group.files if name in remaining],
+                group.checked,
+            )
+            for group in self._actor_groups
+            if any(name in remaining for name in group.files)
+        ]
+        self._populate_actor_tree()
 
     def _actor_scan_done(self):
         self.busy.set_worker(None)

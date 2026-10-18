@@ -9,7 +9,7 @@ from core.db import (
     count_pending_progress,
     save_classification_progress,
 )
-from core.filesystem import ensure_directory, move_file
+from core.filesystem import move_classified_file
 from core.lookup_errors import RateLimitedError, SearchStoppedError
 from core.title_utils import MEDIA_EXTENSIONS, extract_code
 
@@ -55,20 +55,9 @@ class ClassifierService:
             )
             raise
 
-        if "LUXU" in filename.upper():
-            dest = base_path / "LUXU-Series"
-        elif "GANA" in filename.upper():
-            dest = base_path / "GANA-Series"
-        else:
-            dest = base_path / actor_name
-        ensure_directory(dest, self.on_message)
-        target_file = dest / filename
-        if not target_file.is_file():
-            move_file(src, dest, self.on_message)
-        else:
-            existed_dest = base_path / "Existed"
-            ensure_directory(existed_dest, self.on_message)
-            move_file(src, existed_dest, self.on_message)
+        self.on_message(
+            move_classified_file(base_path, filename, actor_name, self.on_message)
+        )
         clear_classification_progress(base_path, filename, self.db_path)
 
     def run(self) -> None:

@@ -1,4 +1,3 @@
-import shutil
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -7,14 +6,17 @@ from typing import Callable
 from core.actor_lookup import ActorLookup
 from core.db import (
     DEFAULT_DB_PATH,
+    clear_classification_progress,
     mark_file_resolved,
     resolve_actor_for_file,
     save_classification_progress,
 )
+from core.filesystem import move_classified_file
 from core.lookup_errors import RateLimitedError, SearchStoppedError
 from core.title_utils import extract_code
 
 MessageFn = Callable[[str], None]
+MoveProgressFn = Callable[[int, int, str], None]
 
 
 @dataclass
@@ -114,32 +116,34 @@ def group_files_by_actor(
     return _groups_from_map(grouped)
 
 
-def move_actor_groups(path: str | Path, groups: list[ActorGroup]) -> list[str]:
+def count_move_tasks(groups: list[ActorGroup]) -> int:
+    return sum(len(group.files) for group in groups if group.checked)
+
+
+def move_actor_groups(
+    path: str | Path,
+    groups: list[ActorGroup],
+    db_path: str | Path | None = None,
+    on_message: MessageFn | None = None,
+    on_progress: MoveProgressFn | None = None,
+) -> list[str]:
     directory = Path(path)
+    resolved_db = db_path if db_path is not None else DEFAULT_DB_PATH
     messages: list[str] = []
-    for group in groups:
-        if not group.checked:
-            continue
-        dest_dir = directory / group.actor
-        try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            messages.append(f"Failed to create {dest_dir}: {error}")
-            continue
-        for filename in group.files:
-            src = directory / filename
-            dest = dest_dir / filename
-            if not src.is_file():
-                messages.append(f"Missing: {filename}")
-                continue
-            if dest.exists():
-                messages.append(f"Skipped (exists): {filename} -> {group.actor}/")
-                continue
-            try:
-                shutil.move(str(src), str(dest))
-                messages.append(f"Moved: {filename} -> {group.actor}/")
-            except OSError as error:
-                messages.append(f"Failed: {filename}: {error}")
+    tasks = [
+        (group.actor, filename)
+        for group in groups
+        if group.checked
+        for filename in group.files
+    ]
+    total = len(tasks)
+    for index, (actor, filename) in enumerate(tasks, start=1):
+        if on_progress:
+            on_progress(index, total, filename)
+        msg = move_classified_file(directory, filename, actor, on_message)
+        messages.append(msg)
+        if msg.startswith("Moved"):
+            clear_classification_progress(directory, filename, resolved_db)
     return messages
 
 
