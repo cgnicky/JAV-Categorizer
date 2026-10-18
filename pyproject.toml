@@ -1,0 +1,37 @@
+[project]
+name = "jav-tools"
+version = "0.2.0"
+description = "PyQt utilities for JAV media classification and SQLite catalog."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "beautifulsoup4>=4.13.4",
+    "drissionpage>=4.1.0.18",
+    # PyQt5-Qt5 stopped publishing Windows wheels after 5.15.2; uv needs explicit pins.
+    "pyqt5==5.15.11",
+    "pyqt5-qt5==5.15.2",
+]
+
+[tool.uv]
+required-environments = ["sys_platform == 'win32'"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.11.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"PyQt5GUI.py" = ["E402", "I001"]
