@@ -337,8 +337,7 @@ class ActorLookup:
                     break
                 self._wait_rate_limit_backoff(attempt)
                 continue
-            if actor.lower() != "others":
-                self._persist_actor(title_name, actor, media_path)
+            self._persist_actor(title_name, actor, media_path)
             return actor
         raise RateLimitedError(str(last_error) if last_error else "JavLibrary rate limit")
 

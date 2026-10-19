@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- UI migrated from PyQt5 to **Flet** (desktop). Entry point remains `python JavTools.py`.
+- Workers use `threading` instead of `QThread`; business logic in `core/` unchanged.
+- Actor scan: one SQLite session per scan, batched progress writes, single pass (no duplicate DB resolution).
+- Flet log panes batch lines to reduce UI churn during large scans.
+- Flet UX: app bar + status line, shared folder/actions layout, expanding logs, Advanced JavLib pause, snackbars, shorter tab labels.
+- Database updater worker no longer duplicates status messages.
+
 ## [0.2.0] - 2026-10-18
 
 ### Added

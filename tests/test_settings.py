@@ -23,3 +23,19 @@ def test_load_migrates_legacy_pause_keys(tmp_path, monkeypatch):
     )
     loaded = load_settings()
     assert loaded.javlib_search_pause_seconds == 2.5
+
+
+def test_ui_theme_persists(tmp_path, monkeypatch):
+    monkeypatch.setattr("core.settings.SETTINGS_FILE", tmp_path / "settings.json")
+    monkeypatch.setattr("core.settings.SETTINGS_DIR", tmp_path)
+
+    settings = AppSettings(ui_theme="dark")
+    save_settings(settings)
+    assert load_settings().ui_theme == "dark"
+
+
+def test_load_normalizes_invalid_ui_theme(tmp_path, monkeypatch):
+    monkeypatch.setattr("core.settings.SETTINGS_FILE", tmp_path / "settings.json")
+    monkeypatch.setattr("core.settings.SETTINGS_DIR", tmp_path)
+    (tmp_path / "settings.json").write_text('{"ui_theme": "neon"}', encoding="utf-8")
+    assert load_settings().ui_theme == "system"

@@ -42,7 +42,7 @@ def test_lookup_actor_from_db_exact_and_prefix(tmp_path: Path):
     assert lookup_actor_from_db("SSIS-001", db_file) == "Yua"
     assert lookup_actor_from_db("ssis-001", db_file) == "Yua"
     assert lookup_actor_from_db("SSIS-001 extra title", db_file) == "Yua"
-    assert lookup_actor_from_db("ABC-999", db_file) is None
+    assert lookup_actor_from_db("ABC-999", db_file) == "Others"
     assert lookup_actor_from_db("missing", db_file) is None
 
 

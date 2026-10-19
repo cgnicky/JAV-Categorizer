@@ -1,22 +1,27 @@
-from PyQt5.QtCore import QThread, pyqtSignal
+from collections.abc import Callable
 
 from core.updater import run_update
+from workers.task_runner import BackgroundTask
 
 
-class JavDatabaseUpdater(QThread):
-    result = pyqtSignal(str)
-    progressResult = pyqtSignal(int)
-    pBarMaxValue = pyqtSignal(int)
-
+class JavDatabaseUpdater(BackgroundTask):
     def __init__(self, path):
         super().__init__()
         self.path = path
 
-    def run(self):
-        for message in run_update(
-            self.path,
-            on_message=self.result.emit,
-            on_progress=self.progressResult.emit,
-            on_max=self.pBarMaxValue.emit,
-        ):
-            self.result.emit(message)
+    def start(
+        self,
+        on_message: Callable[[str], None],
+        on_progress: Callable[[int], None] | None = None,
+        on_max: Callable[[int], None] | None = None,
+        on_finished: Callable[[], None] | None = None,
+    ) -> None:
+        def run() -> None:
+            run_update(
+                self.path,
+                on_message=on_message,
+                on_progress=on_progress or (lambda _i: None),
+                on_max=on_max or (lambda _i: None),
+            )
+
+        super().start(run, on_finished)

@@ -23,6 +23,4 @@ jobs:
         run: ruff check .
 
       - name: Test
-        env:
-          QT_QPA_PLATFORM: offscreen
         run: pytest -q

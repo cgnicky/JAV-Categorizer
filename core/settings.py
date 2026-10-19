@@ -6,6 +6,9 @@ SETTINGS_DIR = Path.home() / ".jav_tools"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 
 
+UI_THEME_CHOICES = frozenset({"light", "dark", "system"})
+
+
 @dataclass
 class AppSettings:
     classifier_path: str = ""
@@ -13,6 +16,7 @@ class AppSettings:
     updater_dir_placeholder: str = "Insert Directory Path Here!"
     fixer_path: str = ""
     actor_path: str = ""
+    ui_theme: str = "system"
 
 
 def _migrate_settings_data(data: dict) -> dict:
@@ -21,6 +25,11 @@ def _migrate_settings_data(data: dict) -> dict:
             if legacy_key in data:
                 data["javlib_search_pause_seconds"] = data[legacy_key]
                 break
+    theme = str(data.get("ui_theme", "system")).lower()
+    if theme not in UI_THEME_CHOICES:
+        data["ui_theme"] = "system"
+    else:
+        data["ui_theme"] = theme
     return data
 
 

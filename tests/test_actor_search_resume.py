@@ -31,6 +31,19 @@ def test_rescan_uses_classification_progress(tmp_path: Path):
     assert groups[0].actor == "Actor Cached"
 
 
+def test_rescan_skips_others_from_progress(tmp_path: Path):
+    db_file = tmp_path / "javlist.db"
+    establish_to_db(db_file).close()
+    mark_file_resolved(tmp_path, "300MIUM-918.mp4", "300MIUM-918", "Others", db_file)
+
+    lookup = MagicMock()
+    groups = group_files_by_actor(tmp_path, ["300MIUM-918.mp4"], lookup, db_path=db_file)
+
+    lookup.lookup.assert_not_called()
+    assert groups[0].actor == "Others"
+    assert groups[0].files == ["300MIUM-918.mp4"]
+
+
 def test_scan_and_group_no_browser_when_all_cached(tmp_path: Path):
     db_file = tmp_path / "javlist.db"
     save_actor_record("X-1", "Actor X", "", db_file)

@@ -1,12 +1,16 @@
 import datetime
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = PROJECT_ROOT / "javlist.db"
 TABLE_NAME = "javlist"
 PROGRESS_TABLE = "classification_progress"
 BATCH_SIZE = 200
+OTHERS_ACTOR = "Others"
+PROGRESS_COMMIT_BATCH = 50
 
 SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
@@ -58,6 +62,16 @@ def establish_to_db(db_path: str | Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def db_session(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
+    conn = establish_to_db(db_path)
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _now_ts() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -67,6 +81,7 @@ def save_actor_record(
     actor: str,
     path: str = "",
     db_path: str | Path | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
     """Store or refresh a resolved actor for a label (web lookup / resume)."""
     from core.title_utils import extract_code
@@ -76,18 +91,24 @@ def save_actor_record(
         return
     normalized_label = code.upper()
     name = str(actor).strip()
-    if not name or name.lower() == "others":
+    if not name:
         return
+    if name.lower() == "others":
+        name = OTHERS_ACTOR
 
-    conn = establish_to_db(db_path)
+    own_conn = conn is None
+    if own_conn:
+        conn = establish_to_db(db_path)
     try:
         conn.execute(
             UPSERT_ACTOR_QUERY,
             (name, normalized_label, _now_ts(), path or ""),
         )
-        conn.commit()
+        if own_conn:
+            conn.commit()
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
 
 
 def save_classification_progress(
@@ -98,9 +119,14 @@ def save_classification_progress(
     note: str = "",
     actor: str = "",
     db_path: str | Path | None = None,
+    conn: sqlite3.Connection | None = None,
+    *,
+    commit: bool = True,
 ) -> None:
     root = str(Path(source_dir).resolve())
-    conn = establish_to_db(db_path)
+    own_conn = conn is None
+    if own_conn:
+        conn = establish_to_db(db_path)
     try:
         conn.execute(
             f"""
@@ -116,26 +142,33 @@ def save_classification_progress(
             """,
             (root, filename, code, actor, status, note, _now_ts()),
         )
-        conn.commit()
+        if commit and conn is not None:
+            conn.commit()
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
 
 
 def clear_classification_progress(
     source_dir: str | Path,
     filename: str,
     db_path: str | Path | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
     root = str(Path(source_dir).resolve())
-    conn = establish_to_db(db_path)
+    own_conn = conn is None
+    if own_conn:
+        conn = establish_to_db(db_path)
     try:
         conn.execute(
             f"DELETE FROM {PROGRESS_TABLE} WHERE source_dir = ? AND filename = ?",
             (root, filename),
         )
-        conn.commit()
+        if own_conn:
+            conn.commit()
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
 
 
 def resolve_actor_for_file(
@@ -143,12 +176,15 @@ def resolve_actor_for_file(
     filename: str,
     code: str,
     db_path: str | Path | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> str | None:
     """Actor for this file from scan progress or javlist (no web)."""
     from core.title_utils import extract_code
 
     root = str(Path(source_dir).resolve())
-    conn = establish_to_db(db_path)
+    own_conn = conn is None
+    if own_conn:
+        conn = establish_to_db(db_path)
     try:
         row = conn.execute(
             f"""
@@ -160,18 +196,19 @@ def resolve_actor_for_file(
         actor = _usable_actor(row[0] if row else None)
         if actor:
             return actor
-    finally:
-        conn.close()
 
-    stem = Path(filename).stem
-    for label in (code, stem, extract_code(filename) or ""):
-        needle = label.strip()
-        if not needle:
-            continue
-        actor = lookup_actor_from_db(needle, db_path)
-        if actor:
-            return actor
-    return None
+        stem = Path(filename).stem
+        for label in (code, stem, extract_code(filename) or ""):
+            needle = label.strip()
+            if not needle:
+                continue
+            actor = lookup_actor_from_db(needle, db_path=db_path, conn=conn)
+            if actor:
+                return actor
+        return None
+    finally:
+        if own_conn:
+            conn.close()
 
 
 def mark_file_resolved(
@@ -180,10 +217,15 @@ def mark_file_resolved(
     code: str,
     actor: str,
     db_path: str | Path | None = None,
+    conn: sqlite3.Connection | None = None,
+    *,
+    commit: bool = True,
 ) -> None:
     name = str(actor).strip()
-    if not name or name.lower() == "others":
+    if not name:
         return
+    if name.lower() == "others":
+        name = OTHERS_ACTOR
     save_classification_progress(
         source_dir,
         filename,
@@ -191,15 +233,20 @@ def mark_file_resolved(
         status="resolved",
         actor=name,
         db_path=db_path,
+        conn=conn,
+        commit=commit,
     )
 
 
 def count_pending_progress(
     source_dir: str | Path,
     db_path: str | Path | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> int:
     root = str(Path(source_dir).resolve())
-    conn = establish_to_db(db_path)
+    own_conn = conn is None
+    if own_conn:
+        conn = establish_to_db(db_path)
     try:
         cur = conn.execute(
             f"SELECT COUNT(*) FROM {PROGRESS_TABLE} WHERE source_dir = ?",
@@ -208,19 +255,26 @@ def count_pending_progress(
         row = cur.fetchone()
         return int(row[0]) if row else 0
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
 
 
 def _usable_actor(actor: str | None) -> str | None:
     if actor is None:
         return None
     name = str(actor).strip()
-    if not name or name.lower() == "others":
+    if not name:
         return None
+    if name.lower() == "others":
+        return OTHERS_ACTOR
     return name
 
 
-def lookup_actor_from_db(label: str, db_path: str | Path | None = None) -> str | None:
+def lookup_actor_from_db(
+    label: str,
+    db_path: str | Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> str | None:
     """Resolve actor from local catalog by exact or prefix label match."""
     from core.title_utils import extract_code
 
@@ -240,7 +294,9 @@ def lookup_actor_from_db(label: str, db_path: str | Path | None = None) -> str |
         seen.add(upper)
         candidates.append(key)
 
-    conn = establish_to_db(db_path)
+    own_conn = conn is None
+    if own_conn:
+        conn = establish_to_db(db_path)
     try:
         for candidate in candidates:
             cur = conn.execute(
@@ -260,4 +316,5 @@ def lookup_actor_from_db(label: str, db_path: str | Path | None = None) -> str |
         row = cur.fetchone()
         return _usable_actor(row[0] if row else None)
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()

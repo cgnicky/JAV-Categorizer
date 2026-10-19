@@ -6,7 +6,9 @@ from typing import Callable
 from core.actor_lookup import ActorLookup
 from core.db import (
     DEFAULT_DB_PATH,
+    PROGRESS_COMMIT_BATCH,
     clear_classification_progress,
+    db_session,
     mark_file_resolved,
     resolve_actor_for_file,
     save_classification_progress,
@@ -17,6 +19,7 @@ from core.title_utils import extract_code
 
 MessageFn = Callable[[str], None]
 MoveProgressFn = Callable[[int, int, str], None]
+LookupFactory = Callable[[MessageFn | None], ActorLookup]
 
 
 @dataclass
@@ -50,22 +53,46 @@ def group_files_by_actor(
     lookup: ActorLookup | None,
     on_message: MessageFn | None = None,
     db_path: str | Path | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    conn=None,
+    lookup_factory: LookupFactory | None = None,
 ) -> list[ActorGroup]:
     directory = Path(path)
     resolved_db = db_path if db_path is not None else DEFAULT_DB_PATH
+    stop = should_stop or (lambda: False)
     grouped: dict[str, list[str]] = defaultdict(list)
     pending: list[str] = []
+    progress_writes = 0
 
     for filename in filenames:
+        if stop():
+            if on_message:
+                on_message("Search stopped (terminate or browser closed).")
+            return _groups_from_map(grouped)
         code = extract_code(filename) or Path(filename).stem
-        cached = resolve_actor_for_file(directory, filename, code, resolved_db)
+        cached = resolve_actor_for_file(directory, filename, code, resolved_db, conn=conn)
         if cached:
             grouped[cached].append(filename)
-            mark_file_resolved(directory, filename, code, cached, resolved_db)
+            mark_file_resolved(
+                directory,
+                filename,
+                code,
+                cached,
+                resolved_db,
+                conn=conn,
+                commit=False,
+            )
+            progress_writes += 1
+            if conn is not None and progress_writes >= PROGRESS_COMMIT_BATCH:
+                conn.commit()
+                progress_writes = 0
             if on_message:
                 on_message(f"From database: {filename} ({code}) -> {cached}")
             continue
         pending.append(filename)
+
+    if conn is not None and progress_writes:
+        conn.commit()
 
     if on_message and filenames:
         skipped = len(filenames) - len(pending)
@@ -78,40 +105,61 @@ def group_files_by_actor(
     if not pending:
         return _groups_from_map(grouped)
 
-    if lookup is None:
+    lookup_client = lookup
+    created_lookup = False
+    if lookup_client is None and lookup_factory is not None:
+        lookup_client = lookup_factory(on_message)
+        created_lookup = True
+
+    if lookup_client is None:
         if on_message:
             on_message("No JavLibrary client for pending files.")
         return _groups_from_map(grouped)
 
-    for filename in pending:
-        code = extract_code(filename) or Path(filename).stem
-        if on_message:
-            on_message(f"JavLibrary: {filename} ({code})")
-        media_path = directory / filename
-        try:
-            actor = lookup.lookup(code, media_path=media_path) or "Others"
-        except SearchStoppedError:
+    try:
+        for filename in pending:
+            if stop():
+                if on_message:
+                    on_message("Search stopped (terminate or browser closed).")
+                break
+            code = extract_code(filename) or Path(filename).stem
             if on_message:
-                on_message("Search stopped (terminate or browser closed).")
-            break
-        except RateLimitedError as error:
-            save_classification_progress(
+                on_message(f"JavLibrary: {filename} ({code})")
+            media_path = directory / filename
+            try:
+                actor = lookup_client.lookup(code, media_path=media_path) or "Others"
+            except SearchStoppedError:
+                if on_message:
+                    on_message("Search stopped (terminate or browser closed).")
+                break
+            except RateLimitedError as error:
+                save_classification_progress(
+                    directory,
+                    filename,
+                    code,
+                    status="rate_limited",
+                    note=str(error),
+                    db_path=resolved_db,
+                    conn=conn,
+                )
+                if on_message:
+                    on_message(
+                        "Rate limit on this file — partial results kept. "
+                        "Scan again: completed files stay in the database and will be skipped."
+                    )
+                break
+            grouped[actor].append(filename)
+            mark_file_resolved(
                 directory,
                 filename,
                 code,
-                status="rate_limited",
-                note=str(error),
-                db_path=resolved_db,
+                actor,
+                resolved_db,
+                conn=conn,
             )
-            if on_message:
-                on_message(
-                    "Rate limit on this file — partial results kept. "
-                    "Scan again: completed files stay in the database and will be skipped."
-                )
-            break
-        grouped[actor].append(filename)
-        if actor.lower() != "others":
-            mark_file_resolved(directory, filename, code, actor, resolved_db)
+    finally:
+        if created_lookup and lookup_client is not None:
+            lookup_client.close()
 
     return _groups_from_map(grouped)
 
@@ -150,7 +198,7 @@ def move_actor_groups(
 def scan_and_group(
     path: str | Path,
     on_message: MessageFn | None = None,
-    lookup_factory: Callable[[MessageFn | None], ActorLookup] | None = None,
+    lookup_factory: LookupFactory | None = None,
     db_path: str | Path | None = None,
     lookup_delay_seconds: float = 0.0,
     should_stop: Callable[[], bool] | None = None,
@@ -169,23 +217,14 @@ def scan_and_group(
 
     factory = lookup_factory or default_factory
 
-    needs_web = any(
-        resolve_actor_for_file(path, name, extract_code(name) or Path(name).stem, resolved_db)
-        is None
-        for name in filenames
-    )
-
-    lookup_client: ActorLookup | None = None
-    if needs_web:
-        lookup_client = factory(on_message)
-    try:
+    with db_session(resolved_db) as conn:
         return group_files_by_actor(
             path,
             filenames,
-            lookup_client,
+            None,
             on_message,
             db_path=resolved_db,
+            should_stop=stop,
+            conn=conn,
+            lookup_factory=factory,
         )
-    finally:
-        if lookup_client is not None:
-            lookup_client.close()

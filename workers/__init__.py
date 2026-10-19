@@ -1,1 +1,1 @@
-"""PyQt background workers (thin wrappers around core)."""
+"""Background workers (thin wrappers around core)."""
